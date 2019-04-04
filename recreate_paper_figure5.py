@@ -221,7 +221,8 @@ if __name__ == '__main__':
         frets.append(fret_estimate)
         # print(string_estimate, fret_estimate, pluck_pos, f0, B)
         print(
-            "Estimating string, fret and plucking position for segment {:d} out of {:d} segments".format(i, x.shape[0]))
+            "Estimating string, fret and plucking position for segment {:d} out of {:d} segments".format(i + 1,
+                                                                                                         x.shape[0]))
 
     time_axis = np.arange(len(y)) / sr
     fig, axes = plt.subplots(3, sharex=True, figsize=(8, 6))
