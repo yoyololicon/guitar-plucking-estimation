@@ -21,6 +21,8 @@ class buffer():
         self.buf[:] = np.concatenate((self.buf[data_size:], x))
         return self.buf
 
+def fft(x, N):
+    x = fftpack.rfft()
 
 def process(x, f0):
     N = len(x)
@@ -65,24 +67,29 @@ mic = sc.get_microphone('2x2')
 
 sr = 44100
 buffersize = 128
-hopsize = 256
+#hopsize = 256
 winsize = 2048
+fftsize = 8192
 
-pitch_o = pitch('default', winsize, hopsize, sr)
-onset_o = onset('default', winsize, hopsize, sr)
-onset_o.set_threshold(0.5)
+pitch_o = pitch('default', winsize, buffersize, sr)
+onset_o = onset('hfc', winsize, buffersize, sr)
+onset_o.set_threshold(0.2)
+onset_o.set_silence(-30.)
 
 temp = buffer(max(winsize, onset_o.get_delay()))
+window = signal.get_window('hann', winsize)
 
-with mic.recorder(samplerate=44100, channels=[0], blocksize=buffersize) as mic2, speaker.player(samplerate=44100,
+with mic.recorder(samplerate=sr, channels=[0], blocksize=buffersize) as mic2, speaker.player(samplerate=sr,
                                                                                                 blocksize=buffersize) as sp:
     while 1:
-        data = mic2.record(numframes=hopsize)
+        data = mic2.record(numframes=buffersize)
+        sp.play(data)
+
         data = data.mean(1).astype(np.float32)
 
         pitch = pitch_o(data)[0]
         offset = onset_o(data)[0]
-        buf_data = temp(data)
+        x = temp(data) * window
         if offset:
             pos = int((offset - 1) * hopsize) - onset_o.get_delay()
             segment = buf_data[pos:]
@@ -91,6 +98,5 @@ with mic.recorder(samplerate=44100, channels=[0], blocksize=buffersize) as mic2,
             #plt.plot(buf_data[pos:])
             #plt.show()
 
-        sp.play(data)
         # print("hello", end='\r')
         # sys.stdout.write("\rpitch: %.2f, amp: %.2f" % (pitch, offset))
