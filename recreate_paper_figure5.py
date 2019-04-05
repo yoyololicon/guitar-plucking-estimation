@@ -7,6 +7,7 @@ import argparse
 from aubio import onset, source
 
 import warnings
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 parser = argparse.ArgumentParser(description='Recreate plucking experiment.')
@@ -16,6 +17,8 @@ parser.add_argument('-fftsize', type=int, default=2 ** 19)
 parser.add_argument('-segment_size', type=float, default=0.04, help='input segment size (in secondes).')
 parser.add_argument('-M', type=int, default=25, help='maximum number of harmonics.')
 parser.add_argument('-L', type=float, default=64.3, help='Length of strings.')
+parser.add_argument('-method', type=str, default='grid',
+                    help='Inharmonicity parameters estimation methods. Default is grid search')
 
 
 def segment_from_onsets(filename, dur):
@@ -25,7 +28,7 @@ def segment_from_onsets(filename, dur):
     sr = s.samplerate
 
     o = onset("hfc", win_s, hop_s, sr)
-    o.set_threshold(0.21)
+    o.set_threshold(0.2)
     o.set_silence(-30.)
     o.set_minioi_s(dur)
     raw_onsets = []
@@ -89,13 +92,31 @@ def harmonic_sum(x, bounds, M, sr):
                 best_f0 = f
         return best_f0
 
-    f0grid = np.arange(bounds[0], bounds[1], 0.1)
+    f0grid = np.arange(bounds[0], bounds[1], 1)
     pitch = best_f0(f0grid)
-    f0grid = np.arange(pitch - 0.1, pitch + 0.1, 0.01)
-    pitch = best_f0(f0grid)
-    f0grid = np.arange(pitch - 0.01, pitch + 0.01, 0.001)
-    pitch = best_f0(f0grid)
+    #f0grid = np.arange(pitch - 1, pitch + 1, 0.1)
+    #pitch = best_f0(f0grid)
+    #f0grid = np.arange(pitch - 0.01, pitch + 0.01, 0.001)
+    #pitch = best_f0(f0grid)
     return pitch
+
+def inharmonic_sum(x, M, sr, init_f0):
+    N = len(x)
+
+    def func(params):
+        f0, B = params
+        cost = np.sum(x[harmonics(N, sr, M, f0, B)[0]])
+        return -cost
+
+    rranges = (slice(init_f0 - 10, init_f0 + 10, 1), slice(0, 1e-3, 1e-4))
+    init_f0, B = brute(func, rranges, finish=None)
+    rranges = (slice(init_f0 - 1, init_f0 + 1, 0.1), slice(max(0, B - 1e-4), B + 1e-4, 1e-5))
+    init_f0, B = brute(func, rranges, finish=None)
+    rranges = (slice(init_f0 - 0.1, init_f0 + 0.1, 0.01), slice(max(0, B - 1e-5), B + 1e-5, 1e-6))
+    init_f0, B = brute(func, rranges, finish=None)
+    rranges = (slice(init_f0 - 0.01, init_f0 + 0.01, 0.001), slice(max(0, B - 1e-6), B + 1e-6, 1e-7))
+    init_f0, B = brute(func, rranges, finish=None)
+    return init_f0, B
 
 
 def find_f0_and_B(spec, M, sr):
@@ -123,20 +144,20 @@ def find_f0_and_B(spec, M, sr):
     new_peaks_freq = []
     for i in range(1, M + 1):
         idx = np.where(x == i)[0]
-        if len(idx) > 1:
-            # dist = np.abs(med_freq * i - peaks_freq[idx])
+        if len(idx):
             dist = -raw_peak_values[idx]
-            new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
-        elif len(idx) == 1:
-            new_peaks_freq.append(peaks_freq[idx[0]])
+            dist2 = np.abs(med_freq * i - peaks_freq[idx])
+            if np.argmin(dist) == np.argmin(dist2):
+                new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
     peaks_freq = np.array(new_peaks_freq)
 
     x = np.round(peaks_freq / med_freq)
-    #plt.plot(spec)
-    #plt.vlines(np.round(peaks_freq / sr * N), -60, 10)
-    #plt.ylim(-60, 10)
-    #plt.xlim(0, N // 10)
-    #plt.show()
+
+    # plt.plot(spec)
+    # plt.vlines(np.round(peaks_freq / sr * N), -60, 10)
+    # plt.ylim(-60, 10)
+    # plt.xlim(0, N // 10)
+    # plt.show()
 
     def func(m, f0, B):
         return m * f0 * np.sqrt(1. + B * m ** 2)
@@ -145,23 +166,7 @@ def find_f0_and_B(spec, M, sr):
     return param[0], param[1]
 
 
-def inharmonic_sum(x, M, sr, init_f0):
-    N = len(x)
 
-    def func(params):
-        f0, B = params
-        cost = np.sum(x[harmonics(N, sr, M, f0, B)[0]])
-        return -cost
-
-    rranges = (slice(init_f0 - 1, init_f0 + 1, 0.1), slice(0, 1e-3, 1e-4))
-    init_f0, B = brute(func, rranges, finish=None)
-    rranges = (slice(init_f0 - 0.1, init_f0 + 0.1, 0.01), slice(max(0, B - 1e-4), B + 1e-4, 1e-5))
-    init_f0, B = brute(func, rranges, finish=None)
-    rranges = (slice(init_f0 - 0.01, init_f0 + 0.01, 0.001), slice(max(0, B - 1e-5), B + 1e-5, 1e-6))
-    init_f0, B = brute(func, rranges, finish=None)
-    rranges = (slice(init_f0 - 0.001, init_f0 + 0.001, 0.0001), slice(max(0, B - 1e-6), B + 1e-6, 1e-7))
-    init_f0, B = brute(func, rranges, finish=None)
-    return init_f0, B
 
 
 if __name__ == '__main__':
@@ -199,9 +204,12 @@ if __name__ == '__main__':
         tx = x[i]
         fx = spec[i]
 
-        # init_f0 = harmonic_sum(fx, [75, 700], 5, sr)
-        # f0, B = inharmonic_sum(fx, M, sr, init_f0)
-        f0, B = find_f0_and_B(fx, M, sr)
+        if args.method == 'curve_fit':
+            f0, B = find_f0_and_B(fx, M, sr)
+        else:
+            init_f0 = harmonic_sum(fx, [75, 700], 5, sr)
+            f0, B = inharmonic_sum(fx, M, sr, init_f0)
+
         norm_f0 = f0 / norm[0]
         norm_B = B / norm[1]
 

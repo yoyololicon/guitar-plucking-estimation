@@ -7,9 +7,11 @@ from multiprocessing import Process, Queue
 import queue
 
 from audiolazy import freq2str
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from scipy import signal, fftpack
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, brute
 
 
 # print(sc.all_speakers(), sc.all_microphones(), sc.default_speaker(), sc.default_microphone())
@@ -34,17 +36,18 @@ def fft(x, N):
 
 
 def get_Z(f0, B, N, M, sr):
-    harms = harmonics(f0, B, M)
+    harms = harmonics(f0, B, N, M, sr)[1]
     Z = np.exp(np.arange(N)[:, None] * harms * 2j * np.pi / sr)
     return Z
 
 
-def harmonics(f, beta, M):
+def harmonics(f, beta, N, M, sr):
     l = np.arange(1, M + 1)
     phi = f * l
     if beta > 0:
         phi *= np.sqrt(1. + beta * l ** 2)
-    return phi
+    idx = np.rint(phi * N / sr).astype(np.int)
+    return idx, phi
 
 
 def find_f0_and_B(spec, M, sr, ref_f0):
@@ -69,33 +72,48 @@ def find_f0_and_B(spec, M, sr, ref_f0):
     if ref_f0:
         med_freq = ref_f0
 
-    # get dominant harmonic peaks
-
     # remove false harmonics
     x = np.round(peaks_freq / med_freq).astype(int)
     new_peaks_freq = []
     for i in range(1, M + 1):
         idx = np.where(x == i)[0]
-        if len(idx) > 1:
-            # dist = np.abs(med_freq * i - peaks_freq[idx])
+        if len(idx):
             dist = -raw_peak_values[idx]
-            new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
-        elif len(idx) == 1:
-            new_peaks_freq.append(peaks_freq[idx[0]])
+            dist2 = np.abs(med_freq * i - peaks_freq[idx])
+            if np.argmin(dist) == np.argmin(dist2):
+                new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
     peaks_freq = np.array(new_peaks_freq)
     x = np.round(peaks_freq / med_freq)
 
-    plt.plot(spec)
-    plt.vlines(np.round(peaks_freq * factor), -40, 20)
-    plt.ylim(-40, 20)
-    plt.xlim(0, len(spec) // 2)
-    plt.show()
+    #plt.plot(spec)
+    #plt.vlines(np.round(peaks_freq * factor), -100, 0)
+    #plt.ylim(-100, 0)
+    #plt.xlim(0, len(spec) // 3)
+    #plt.show()
 
     def func(m, f0, B):
         return m * f0 * np.sqrt(1. + B * m ** 2)
-
-    param, _ = curve_fit(func, x, peaks_freq, bounds=(0., [1400., 1e-3]))
+    print(inharmonic_sum(spec, M, sr, med_freq))
+    param, _ = curve_fit(func, x, peaks_freq, bounds=([30., 0.], [1400., 1e-3]))
     return param[0], param[1]
+
+def inharmonic_sum(x, M, sr, init_f0):
+    N = len(x) * 2
+
+    def func(params):
+        f0, B = params
+        cost = np.sum(x[harmonics(f0, B, N, M, sr)[0]])
+        return -cost
+
+    rranges = (slice(init_f0 - 2, init_f0 + 2, 0.1), slice(0, 1e-3, 1e-4))
+    init_f0, B = brute(func, rranges, finish=None)
+    rranges = (slice(init_f0 - 0.1, init_f0 + 0.1, 0.01), slice(max(0, B - 1e-4), B + 1e-4, 1e-5))
+    init_f0, B = brute(func, rranges, finish=None)
+    rranges = (slice(init_f0 - 0.01, init_f0 + 0.01, 0.001), slice(max(0, B - 1e-5), B + 1e-5, 1e-6))
+    init_f0, B = brute(func, rranges, finish=None)
+    rranges = (slice(init_f0 - 0.001, init_f0 + 0.001, 0.0001), slice(max(0, B - 1e-6), B + 1e-6, 1e-7))
+    init_f0, B = brute(func, rranges, finish=None)
+    return init_f0, B
 
 
 def process(x, window, N, M, sr, ref_f0):
@@ -110,15 +128,15 @@ speaker = sc.default_speaker()
 mic = sc.default_microphone()
 
 sr = 44100
-buffersize = 128
+buffersize = 64
 # hopsize = 256
 winsize = 2048
-fftsize = 2 ** 16
+fftsize = 2 ** 19
 
 pitch_o = pitch('default', winsize, buffersize, sr)
 onset_o = onset('hfc', winsize, buffersize, sr)
-onset_o.set_threshold(0.1)
-onset_o.set_silence(-50.)
+onset_o.set_threshold(0.2)
+onset_o.set_silence(-60.)
 
 # pv = pvoc(winsize, buffersize)  # phase vocoder
 # pv.set_window('hanning')
@@ -154,7 +172,7 @@ with mic.recorder(samplerate=sr, channels=[0], blocksize=buffersize) as mic2, sp
             buf[idx:idx + buffersize] = data[:winsize - idx]
             idx += buffersize
             if idx >= winsize:
-                p = Process(target=f, args=(q, buf, window, fftsize, 20, sr, pitch))
+                p = Process(target=f, args=(q, buf, window, fftsize, 25, sr, pitch))
                 p.start()
                 idx = -1
 
@@ -162,7 +180,7 @@ with mic.recorder(samplerate=sr, channels=[0], blocksize=buffersize) as mic2, sp
             f0, B = q.get(block=False)
             p.join(timeout=None)
             # print(freq2str(f0))
-            sys.stdout.write("\rf0: %.2f, B: %.6f, %.2f" % (f0, B, pitch))
+            sys.stdout.write("\nf0: %.2f, B: %.10f, %.2f" % (f0, B, pitch))
         except queue.Empty:
             pass
 
