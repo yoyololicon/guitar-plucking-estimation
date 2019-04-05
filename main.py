@@ -27,10 +27,10 @@ class buffer():
 
 
 def fft(x, N):
-    x = fftpack.rfft(x, N)
+    x = fftpack.rfft(x, N) / len(x)
     x **= 2
-    spec = np.concatenate(([x[0]], x[1:-1:2] + x[2:-1:2]))
-    return np.log(spec)
+    spec = np.concatenate((x[:1], x[1:-1:2] + x[2:-1:2]))
+    return 10 * np.log10(spec)
 
 
 def get_Z(f0, B, N, M, sr):
@@ -48,30 +48,28 @@ def harmonics(f, beta, M):
 
 
 def find_f0_and_B(spec, M, sr, ref_f0):
-    factor = (len(spec) - 1) * 2 / sr
+    factor = len(spec) * 2 / sr
 
     # find spectral peaks
-    peaks = signal.argrelmax(spec[:int(ref_f0 * (M + 1) * factor)])[0]
-    peak_values = spec[peaks]
+    raw_peaks = signal.argrelmax(spec)[0]
+    raw_peak_values = spec[raw_peaks]
 
-    # low pass
-    # thresh = np.min(spec[:round(30 * factor)])
-    # peaks = peaks[np.where(peak_values > thresh)]
-    # peak_values = spec[peaks]
+    # thresholding
+    idx = np.where(raw_peak_values > raw_peak_values.max() - 30)
+    peaks = raw_peaks[idx]
+    peak_values = raw_peak_values[idx]
 
+    # get dominant harmonic peaks
+    peaks = np.sort(peaks[np.argsort(peak_values)[-M:]])
     peaks_freq = peaks / factor
 
-    rough_freq = np.sort(peaks_freq[np.argsort(peak_values)[-M:]])
     # get approximated f0
-    freq_diff = np.diff(rough_freq)
+    freq_diff = np.diff(peaks_freq)
     med_freq = np.median(freq_diff)
-    print(med_freq, ref_f0, rough_freq)
     if ref_f0:
         med_freq = ref_f0
-    # get dominant harmonic peaks
 
-    def func(m, f0, B):
-        return m * f0 * np.sqrt(1. + B * m ** 2)
+    # get dominant harmonic peaks
 
     # remove false harmonics
     x = np.round(peaks_freq / med_freq).astype(int)
@@ -80,22 +78,23 @@ def find_f0_and_B(spec, M, sr, ref_f0):
         idx = np.where(x == i)[0]
         if len(idx) > 1:
             # dist = np.abs(med_freq * i - peaks_freq[idx])
-            dist = -peak_values[idx]
+            dist = -raw_peak_values[idx]
             new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
         elif len(idx) == 1:
             new_peaks_freq.append(peaks_freq[idx[0]])
-
     peaks_freq = np.array(new_peaks_freq)
     x = np.round(peaks_freq / med_freq)
-    print(np.round(np.diff(peaks_freq) * factor))
 
     plt.plot(spec)
-    plt.vlines(np.round(peaks_freq * factor), -30, 20)
-    plt.ylim(-30, 20)
+    plt.vlines(np.round(peaks_freq * factor), -40, 20)
+    plt.ylim(-40, 20)
     plt.xlim(0, len(spec) // 2)
     plt.show()
-    param, _ = curve_fit(func, x, peaks_freq, bounds=(0., [1400., 1e-3]))
 
+    def func(m, f0, B):
+        return m * f0 * np.sqrt(1. + B * m ** 2)
+
+    param, _ = curve_fit(func, x, peaks_freq, bounds=(0., [1400., 1e-3]))
     return param[0], param[1]
 
 

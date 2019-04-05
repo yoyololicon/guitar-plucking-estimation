@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import argparse
 from aubio import onset, source
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 parser = argparse.ArgumentParser(description='Recreate plucking experiment.')
 parser.add_argument('infile', type=str, help='shoud be the file "recording_of_plucking_with_sudden_changes.wav"')
 parser.add_argument('matfile', type=str, help='the training data matlab file.')
