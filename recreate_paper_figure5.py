@@ -22,7 +22,7 @@ def segment_from_onsets(filename, dur):
     sr = s.samplerate
 
     o = onset("hfc", win_s, hop_s, sr)
-    o.set_threshold(0.2)
+    o.set_threshold(0.21)
     o.set_silence(-30.)
     o.set_minioi_s(dur)
     raw_onsets = []
@@ -58,9 +58,9 @@ def get_Z(f0, N, sr, M, B):
 
 
 def fft(x, N):
-    x = fftpack.fft(x, N)
-    x = np.abs(x) ** 2
-    x_db = 10 * np.log10(x)
+    x = fftpack.fft(x, N) / len(x)
+    x = np.abs(x)
+    x_db = 20 * np.log10(x)
     return x_db
 
 
@@ -95,50 +95,50 @@ def harmonic_sum(x, bounds, M, sr):
     return pitch
 
 
-def find_f0_and_B(x, M, sr):
-    N = len(x)
+def find_f0_and_B(spec, M, sr):
+    N = len(spec)
 
     # find spectral peaks
-    peaks = signal.argrelmax(x[:N // 2])[0]
-    peak_values = x[peaks]
+    raw_peaks = signal.argrelmax(spec[:N // 2])[0]
+    raw_peak_values = spec[raw_peaks]
 
-    # low pass
-    thresh = np.max(x[:round(30 / sr * N)])
-    peaks = peaks[np.where(peak_values > thresh)]
-    peak_values = x[peaks]
+    # thresholding
+    idx = np.where(raw_peak_values > raw_peak_values.max() - 30)
+    peaks = raw_peaks[idx]
+    peak_values = raw_peak_values[idx]
 
     # get dominant harmonic peaks
     peaks = np.sort(peaks[np.argsort(peak_values)[-M:]])
-
-    # plt.plot(x)
-    # plt.vlines(peaks, -60, 100)
-    # plt.ylim(-60, 100)
-    # plt.xlim(0, N // 10)
-    # plt.show()
     peaks_freq = peaks / N * sr
 
     # get approximated f0
     freq_diff = np.diff(peaks_freq)
-    med_freq, mean_freq = np.median(freq_diff), freq_diff.mean()
+    med_freq = np.median(freq_diff)
+
+    # remove false harmonics
+    x = np.round(peaks_freq / med_freq).astype(int)
+    new_peaks_freq = []
+    for i in range(1, M + 1):
+        idx = np.where(x == i)[0]
+        if len(idx) > 1:
+            # dist = np.abs(med_freq * i - peaks_freq[idx])
+            dist = -raw_peak_values[idx]
+            new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
+        elif len(idx) == 1:
+            new_peaks_freq.append(peaks_freq[idx[0]])
+    peaks_freq = np.array(new_peaks_freq)
+
+    x = np.round(peaks_freq / med_freq)
+    #plt.plot(spec)
+    #plt.vlines(np.round(peaks_freq / sr * N), -60, 10)
+    #plt.ylim(-60, 10)
+    #plt.xlim(0, N // 10)
+    #plt.show()
 
     def func(m, f0, B):
         return m * f0 * np.sqrt(1. + B * m ** 2)
 
-    # remove false harmonics
-    x = np.round(peaks_freq / med_freq)
-    new_peaks_freq = []
-    for i in np.unique(x):
-        idx = np.where(x == i)[0]
-        if len(idx) > 1:
-            dist = np.abs(med_freq * i - peaks_freq[idx])
-            new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
-        elif len(idx) == 1:
-            new_peaks_freq.append(peaks_freq[idx[0]])
-
-    peaks_freq = np.array(new_peaks_freq)
-    x = np.round(peaks_freq / med_freq)
-    param, _ = curve_fit(func, x, peaks_freq, bounds=([30., 0.], [1400., 1e-3]))
-
+    param, _ = curve_fit(func, x, peaks_freq, bounds=(0., [1400., 1e-3]))
     return param[0], param[1]
 
 
@@ -196,7 +196,7 @@ if __name__ == '__main__':
         tx = x[i]
         fx = spec[i]
 
-        # init_f0 = harmonic_sum(fx, f0_limits, M_init, sr)
+        # init_f0 = harmonic_sum(fx, [75, 700], 5, sr)
         # f0, B = inharmonic_sum(fx, M, sr, init_f0)
         f0, B = find_f0_and_B(fx, M, sr)
         norm_f0 = f0 / norm[0]
