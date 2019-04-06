@@ -3,11 +3,16 @@ import numpy as np
 from aubio import pitch, onset, pvoc
 import matplotlib.pyplot as plt
 import sys
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Pipe
 import queue
+from numba import jit
+from time import time
+import random
+from sklearn.preprocessing import MinMaxScaler
 
 from audiolazy import freq2str
 import warnings
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from scipy import signal, fftpack
@@ -47,58 +52,16 @@ def harmonics(f, beta, N, M, sr):
     if beta > 0:
         phi *= np.sqrt(1. + beta * l ** 2)
     idx = np.rint(phi * N / sr).astype(np.int)
+    limit = np.where(idx > N // 2 - 1)[0]
+    if len(limit):
+        idx = idx[:limit[0]]
+        phi = phi[:limit[0]]
     return idx, phi
 
 
-def find_f0_and_B(spec, M, sr, ref_f0):
-    factor = len(spec) * 2 / sr
-
-    # find spectral peaks
-    raw_peaks = signal.argrelmax(spec)[0]
-    raw_peak_values = spec[raw_peaks]
-
-    # thresholding
-    idx = np.where(raw_peak_values > raw_peak_values.max() - 30)
-    peaks = raw_peaks[idx]
-    peak_values = raw_peak_values[idx]
-
-    # get dominant harmonic peaks
-    peaks = np.sort(peaks[np.argsort(peak_values)[-M:]])
-    peaks_freq = peaks / factor
-
-    # get approximated f0
-    freq_diff = np.diff(peaks_freq)
-    med_freq = np.median(freq_diff)
-    if ref_f0:
-        med_freq = ref_f0
-
-    # remove false harmonics
-    x = np.round(peaks_freq / med_freq).astype(int)
-    new_peaks_freq = []
-    for i in range(1, M + 1):
-        idx = np.where(x == i)[0]
-        if len(idx):
-            dist = -raw_peak_values[idx]
-            dist2 = np.abs(med_freq * i - peaks_freq[idx])
-            if np.argmin(dist) == np.argmin(dist2):
-                new_peaks_freq.append(peaks_freq[idx[np.argmin(dist)]])
-    peaks_freq = np.array(new_peaks_freq)
-    x = np.round(peaks_freq / med_freq)
-
-    #plt.plot(spec)
-    #plt.vlines(np.round(peaks_freq * factor), -100, 0)
-    #plt.ylim(-100, 0)
-    #plt.xlim(0, len(spec) // 3)
-    #plt.show()
-
-    def func(m, f0, B):
-        return m * f0 * np.sqrt(1. + B * m ** 2)
-    print(inharmonic_sum(spec, M, sr, med_freq))
-    param, _ = curve_fit(func, x, peaks_freq, bounds=([30., 0.], [1400., 1e-3]))
-    return param[0], param[1]
-
-def inharmonic_sum(x, M, sr, init_f0):
-    N = len(x) * 2
+def process(x, sr, window, N, M, init_f0):
+    x = x / np.abs(x).max()
+    x = fft(x * window, N)
 
     def func(params):
         f0, B = params
@@ -116,83 +79,106 @@ def inharmonic_sum(x, M, sr, init_f0):
     return init_f0, B
 
 
-def process(x, window, N, M, sr, ref_f0):
-    x = x / np.abs(x).max()
-    x = fft(x * window, N)
-    return find_f0_and_B(x, M, sr, ref_f0)
-
-
 # speaker = sc.get_speaker('2x2')
 # mic = sc.get_microphone('2x2')
 speaker = sc.default_speaker()
 mic = sc.default_microphone()
 
 sr = 44100
-buffersize = 64
-# hopsize = 256
+buffersize = 128
 winsize = 2048
 fftsize = 2 ** 19
+
+num_fret = 12
+num_string = 6
+pos_table = np.empty((num_string, num_fret + 1, 2))
 
 pitch_o = pitch('default', winsize, buffersize, sr)
 onset_o = onset('hfc', winsize, buffersize, sr)
 onset_o.set_threshold(0.2)
 onset_o.set_silence(-60.)
 
-# pv = pvoc(winsize, buffersize)  # phase vocoder
-# pv.set_window('hanning')
-temp = buffer(winsize)
-# fftbuf = np.empty(fftsize)
-window = signal.get_window('hann', winsize)
-
-
-def f(q, *args):
-    q.put(process(*args))
-
-
-q = Queue(1)
+window = signal.get_window('hamming', winsize)
 buf = np.empty(winsize)
-idx = -1
-with mic.recorder(samplerate=sr, channels=[0], blocksize=buffersize) as mic2, speaker.player(samplerate=sr,
-                                                                                             blocksize=buffersize) as sp:
+
+
+def f(p):
     while 1:
-        data = mic2.record(numframes=buffersize)
-        sp.play(data)
+        args = p.recv()
+        p.send(process(*args))
 
-        data = data.mean(1).astype(np.float32)
 
-        pitch = pitch_o(data)[0]
-        offset = onset_o(data)[0]
-        # spec = pv(data).norm
-        # x = temp(data)
+parent_conn, child_conn = Pipe()
+p = Process(target=f, args=(child_conn,))
+pitch_list = []
 
-        if offset:
-            idx = 0
+idx = -1
+string_idx = -1
+random_fret = random.randint(0, num_fret)
+mean_size = 5
+data_list = [0] * mean_size
+is_training = True
 
-        if idx >= 0:
-            buf[idx:idx + buffersize] = data[:winsize - idx]
-            idx += buffersize
+scaler = MinMaxScaler(copy=False)
+p.start()
+try:
+    with mic.recorder(samplerate=sr, channels=[0], blocksize=buffersize) as mic2, speaker.player(samplerate=sr,
+                                                                                                 blocksize=buffersize) as sp:
+        while 1:
+            data = mic2.record(numframes=buffersize)
+            sp.play(data)
+
+            data = data.mean(1).astype(np.float32)
+
+            pitch = pitch_o(data)[0]
+            offset = onset_o(data)[0]
+            if offset:
+                idx = 0
+
             if idx >= winsize:
-                p = Process(target=f, args=(q, buf, window, fftsize, 25, sr, pitch))
-                p.start()
+                parent_conn.send((buf, sr, window, fftsize, 25, sum(pitch_list) / len(pitch_list)))
+                pitch_list.clear()
                 idx = -1
+            elif idx >= 0:
+                buf[idx:idx + buffersize] = data[:winsize - idx]
+                idx += buffersize
+                pitch_list.append(pitch)
 
-        try:
-            f0, B = q.get(block=False)
-            p.join(timeout=None)
-            # print(freq2str(f0))
-            sys.stdout.write("\nf0: %.2f, B: %.10f, %.2f" % (f0, B, pitch))
-        except queue.Empty:
-            pass
+            if parent_conn.poll():
+                data = np.array(parent_conn.recv())
+                if string_idx in range(num_string):
+                    if len(data_list) < mean_size:
+                        data_list.append(data)
+                        print(len(data_list))
+                elif string_idx > num_string:
+                    data[0] = np.log(data[0])
+                    data = scaler.transform(data[None, :])[0]
+                    dist = np.sqrt(np.sum((pos_table - data) ** 2, 1))
+                    best_pos = np.argmin(dist)
+                    s, f = divmod(best_pos, num_fret + 1)
+                    print(s + 1, f)
 
-        # spec = fft(x * window, fftsize)
-        # f0, B = find_f0_and_B(np.log(spec), 20, sr)
+            if len(data_list) == mean_size:
+                if string_idx in range(num_string):
+                    mean_value = np.vstack(data_list).mean(0)
+                    frets = random_fret - np.arange(num_fret + 1)
+                    pos_table[string_idx, :] = np.power(2, frets[:, None] / [12, 6]) * mean_value
+                    # pos_table[string_idx, :, 0] = np.power(2, frets / 12) * mean_value[0]
+                    # pos_table[string_idx, :, 1] = np.power(2, frets / 6) * mean_value[1]
 
-        # if offset:
-        # pos = int((offset - 1) * hopsize) - onset_o.get_delay()
-        # segment = buf_data[pos:]
-        # print(len(segment))
-        # print(process(segment, pitch), pitch)
-        # plt.plot(buf_data[pos:])
-        # plt.show()
+                string_idx += 1
+                random_fret = random.randint(0, num_fret)
+                data_list.clear()
+                if string_idx in range(num_string):
+                    print("Pluck {:d} string at {:d} fret.".format(string_idx + 1, random_fret))
 
-        # print("hello", end='\r')
+            if string_idx == num_string:
+                pos_table[:, :, 0] = np.log(pos_table[:, :, 0])
+                pos_table = pos_table.reshape(-1, 2)
+                pos_table = scaler.fit_transform(pos_table)
+                string_idx += 1
+
+                # sys.stdout.write("\rf0: %.2f, B: %.10f, %.2f" % (f0, B, pitch))
+
+except KeyboardInterrupt:
+    print("Finish")
